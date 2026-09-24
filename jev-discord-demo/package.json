@@ -1,0 +1,16 @@
+{
+  "name": "jev-discord-demo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20.6" },
+  "scripts": {
+    "preflight": "node --env-file=.env preflight.mjs",
+    "bot": "node --env-file=.env jev-mod.mjs bot",
+    "flood": "node --env-file=.env jev-mod.mjs flood"
+  },
+  "dependencies": {
+    "@composio/core": "0.20.0",
+    "discord.js": "^14"
+  }
+}
