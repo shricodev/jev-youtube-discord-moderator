@@ -1,16 +1,14 @@
 // jev-mod.mjs
-// Discord chat moderator that uses TypeSafe's Jev (via OpenRouter's System One API, no LLM in the loop)
+// Discord chat moderator that uses TypeSafe's Jev (via Composio direct execution, no LLM in the loop)
 // to judge every message, and discord.js to delete the negative ones.
-// The Composio direct-execution version of this file lives in composio-version/.
 //
 //   node --env-file=.env jev-mod.mjs bot          # run the moderator
 //   node --env-file=.env jev-mod.mjs flood 60     # flood the test channel with 60 messages
 //
-// Requires Node 20.6+ and:  npm i discord.js
+// Requires Node 20.6+ and:  npm i discord.js @composio/core
 
 import { Client, GatewayIntentBits, Events, WebhookClient } from 'discord.js';
-
-const JEV_URL = 'https://openrouter.ai/api/v1/systemone';
+import { Composio } from '@composio/core';
 
 const env = process.env;
 const mode = process.argv[2] ?? 'bot';
@@ -23,7 +21,7 @@ else console.log('Usage: node --env-file=.env jev-mod.mjs [bot | flood <count>]'
 // Moderator bot
 // ─────────────────────────────────────────────────────────────────────────────
 async function runBot() {
-  for (const k of ['DISCORD_TOKEN', 'OPENROUTER_API_KEY']) {
+  for (const k of ['DISCORD_TOKEN', 'COMPOSIO_API_KEY', 'COMPOSIO_USER_ID']) {
     if (!env[k]) throw new Error(`Missing ${k} in .env`);
   }
 
@@ -32,8 +30,12 @@ async function runBot() {
   const MAX_IN_FLIGHT = Number(env.MAX_IN_FLIGHT ?? 16); // concurrent Jev calls
   const WATCH = env.WATCH_CHANNEL_ID || null; // optional: only moderate one channel
 
-  const JEV_MODEL = env.JEV_MODEL || '~typesafe/jev-latest';
-  const JEV_TIMEOUT_MS = Number(env.JEV_TIMEOUT_MS ?? 10000);
+  const composio = new Composio({ apiKey: env.COMPOSIO_API_KEY });
+  // Composio requires a toolkit version for direct execution. Pin one if you have it,
+  // otherwise run "latest" with the explicit opt-in.
+  const versionOpts = env.JEV_TOOLKIT_VERSION
+    ? { version: env.JEV_TOOLKIT_VERSION }
+    : { dangerouslySkipVersionCheck: true };
 
   // Both questions run in parallel inside one Jev call.
   const QUESTIONS = {
@@ -46,8 +48,6 @@ async function runBot() {
     },
     category: {
       type: 'choice',
-      // OpenRouter requires instructions on choice questions (Composio treats them as optional).
-      instructions: 'Which kind of message is this?',
       criteria: {
         insult: 'Insults or belittles someone',
         harassment: 'Targets, dismisses or tells someone to go away',
@@ -59,24 +59,23 @@ async function runBot() {
 
   async function judge(text) {
     const t0 = performance.now();
-    const res = await fetch(JEV_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
+    const res = await composio.tools.execute('JEV_EVALUATE_STATE', {
+      userId: env.COMPOSIO_USER_ID,
+      arguments: {
+        state: text,
+        questions: QUESTIONS,
+        ...(env.JEV_MODEL ? { model: env.JEV_MODEL } : {}),
       },
-      body: JSON.stringify({ model: JEV_MODEL, state: text, questions: QUESTIONS }),
-      signal: AbortSignal.timeout(JEV_TIMEOUT_MS),
+      ...versionOpts,
     });
-    const body = await res.json().catch(() => null);
     const ms = performance.now() - t0;
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${body?.error?.message ?? JSON.stringify(body)}`);
-    const a = body.answers;
+    if (!res.successful) throw new Error(res.error || 'JEV_EVALUATE_STATE failed');
+    const a = res.data.answers;
     return {
       ms,
       p: a.negative.noul,
       category: a.category.choice,
-      tokens: body.usage?.input_tokens ?? 0,
+      tokens: res.data.usage?.input_tokens ?? 0,
     };
   }
 
@@ -211,7 +210,7 @@ async function runBot() {
     console.log('\n──────── summary ────────');
     console.log(`messages judged : ${stats.seen}  (${(stats.seen / secs).toFixed(2)}/s over ${secs.toFixed(0)}s)`);
     console.log(`deleted/review/kept/errors : ${stats.deleted}/${stats.review}/${stats.kept}/${stats.errors}`);
-    console.log(`Jev via OpenRouter: p50 ${fmt(pct(stats.jevMs, 50))}  p95 ${fmt(pct(stats.jevMs, 95))}`);
+    console.log(`Jev via Composio : p50 ${fmt(pct(stats.jevMs, 50))}  p95 ${fmt(pct(stats.jevMs, 95))}`);
     console.log(`receive → deleted: p50 ${fmt(pct(stats.totalMs, 50))}  p95 ${fmt(pct(stats.totalMs, 95))}`);
     console.log(`visible in chat  : p50 ${fmt(pct(stats.visibleMs, 50))}  p95 ${fmt(pct(stats.visibleMs, 95))}  (clock-skew sensitive)`);
     console.log(`input tokens     : ${stats.tokens}`);

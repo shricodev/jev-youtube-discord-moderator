@@ -1,15 +1,10 @@
-// preflight.mjs: verifies the Composio → Jev path works before touching Discord.
-import { Composio } from '@composio/core';
-
+// preflight.mjs: verifies the OpenRouter → Jev path works before touching Discord.
+// The Composio version of this file lives in composio-version/.
 const env = process.env;
-for (const k of ['COMPOSIO_API_KEY', 'COMPOSIO_USER_ID']) {
-  if (!env[k]) { console.error(`Missing ${k} in .env`); process.exit(1); }
-}
+if (!env.OPENROUTER_API_KEY) { console.error('Missing OPENROUTER_API_KEY in .env'); process.exit(1); }
 
-const composio = new Composio({ apiKey: env.COMPOSIO_API_KEY });
-const versionOpts = env.JEV_TOOLKIT_VERSION
-  ? { version: env.JEV_TOOLKIT_VERSION }
-  : { dangerouslySkipVersionCheck: true };
+const JEV_URL = 'https://openrouter.ai/api/v1/systemone';
+const JEV_MODEL = env.JEV_MODEL || '~typesafe/jev-latest';
 
 const samples = [
   ['nobody asked for your opinion, go away', true],
@@ -18,9 +13,14 @@ const samples = [
 
 for (const [text, expectHostile] of samples) {
   const t0 = performance.now();
-  const res = await composio.tools.execute('JEV_EVALUATE_STATE', {
-    userId: env.COMPOSIO_USER_ID,
-    arguments: {
+  const res = await fetch(JEV_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: JEV_MODEL,
       state: text,
       questions: {
         negative: {
@@ -28,18 +28,18 @@ for (const [text, expectHostile] of samples) {
           instructions: 'The message is a hostile comment aimed at a person: an insult, harassment, a personal attack, or telling someone to leave.',
         },
       },
-      ...(env.JEV_MODEL ? { model: env.JEV_MODEL } : {}),
-    },
-    ...versionOpts,
+    }),
+    signal: AbortSignal.timeout(Number(env.JEV_TIMEOUT_MS ?? 10000)),
   });
+  const body = await res.json().catch(() => null);
   const ms = Math.round(performance.now() - t0);
-  if (!res.successful) {
-    console.error('❌ Jev call failed:', res.error);
-    console.error('Full response:', JSON.stringify(res, null, 2));
+  if (!res.ok) {
+    console.error(`❌ Jev call failed: HTTP ${res.status}`);
+    console.error('Full response:', JSON.stringify(body, null, 2));
     process.exit(1);
   }
-  const p = res.data.answers.negative.noul;
+  const p = body.answers.negative.noul;
   const ok = expectHostile ? p >= 0.5 : p < 0.5;
-  console.log(`${ok ? '✅' : '⚠️ '} ${ms}ms  p=${p.toFixed(2)}  "${text}"`);
+  console.log(`${ok ? '✅' : '⚠️ '} ${ms}ms  p=${p.toFixed(2)}  "${text}"  (model ${body.model})`);
 }
-console.log('\nPreflight done. Composio → Jev works.');
+console.log('\nPreflight done. OpenRouter → Jev works.');
